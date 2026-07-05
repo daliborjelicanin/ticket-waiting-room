@@ -1,0 +1,30 @@
+[versions]
+springBoot = "4.1.0"
+awsSdk = "2.46.21"
+junit = "6.1.1"
+testcontainers = "2.0.5"
+assertj = "3.27.7"
+mockito = "5.20.0"
+foojayResolver = "1.0.0"
+
+[libraries]
+spring-boot-starter-web = { module = "org.springframework.boot:spring-boot-starter-web", version.ref = "springBoot" }
+spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test", version.ref = "springBoot" }
+aws-sdk-bom = { module = "software.amazon.awssdk:bom", version.ref = "awsSdk" }
+aws-sdk-dynamodb = { module = "software.amazon.awssdk:dynamodb" }
+aws-sdk-sqs = { module = "software.amazon.awssdk:sqs" }
+aws-sdk-sns = { module = "software.amazon.awssdk:sns" }
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
+testcontainers-bom = { module = "org.testcontainers:testcontainers-bom", version.ref = "testcontainers" }
+testcontainers-junit-jupiter = { module = "org.testcontainers:junit-jupiter" }
+testcontainers-postgresql = { module = "org.testcontainers:postgresql" }
+testcontainers-localstack = { module = "org.testcontainers:localstack" }
+assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
+mockito-core = { module = "org.mockito:mockito-core", version.ref = "mockito" }
+
+[bundles]
+testing = ["junit-jupiter", "assertj-core", "mockito-core"]
+
+[plugins]
+spring-boot = { id = "org.springframework.boot", version.ref = "springBoot" }

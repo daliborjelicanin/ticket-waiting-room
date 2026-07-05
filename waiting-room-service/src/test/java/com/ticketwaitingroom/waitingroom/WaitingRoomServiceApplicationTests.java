@@ -1,0 +1,12 @@
+package com.ticketwaitingroom.waitingroom;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.context.SpringBootTest;
+
+@SpringBootTest
+class WaitingRoomServiceApplicationTests {
+
+    @Test
+    void contextLoads() {
+    }
+}
