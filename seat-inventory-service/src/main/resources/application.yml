@@ -1,3 +1,14 @@
 spring:
   application:
     name: seat-inventory-service
+
+seat-inventory:
+  table-name: seat-inventory
+  hold-duration: PT5M
+
+aws:
+  region: ${AWS_REGION:us-east-1}
+  dynamodb:
+    # Empty -> use the real AWS endpoint + default credentials provider chain.
+    # Set (e.g. http://localhost:4566) to point at LocalStack for local runs.
+    endpoint: ${AWS_DYNAMODB_ENDPOINT:}

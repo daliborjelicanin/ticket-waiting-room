@@ -5,6 +5,7 @@ junit = "6.1.1"
 testcontainers = "2.0.5"
 assertj = "3.27.7"
 mockito = "5.20.0"
+lombok = "1.18.38"
 foojayResolver = "1.0.0"
 
 [libraries]
@@ -17,11 +18,12 @@ aws-sdk-sns = { module = "software.amazon.awssdk:sns" }
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
 testcontainers-bom = { module = "org.testcontainers:testcontainers-bom", version.ref = "testcontainers" }
-testcontainers-junit-jupiter = { module = "org.testcontainers:junit-jupiter" }
-testcontainers-postgresql = { module = "org.testcontainers:postgresql" }
-testcontainers-localstack = { module = "org.testcontainers:localstack" }
+testcontainers-junit-jupiter = { module = "org.testcontainers:testcontainers-junit-jupiter" }
+testcontainers-postgresql = { module = "org.testcontainers:testcontainers-postgresql" }
+testcontainers-localstack = { module = "org.testcontainers:testcontainers-localstack" }
 assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
 mockito-core = { module = "org.mockito:mockito-core", version.ref = "mockito" }
+lombok = { module = "org.projectlombok:lombok", version.ref = "lombok" }
 
 [bundles]
 testing = ["junit-jupiter", "assertj-core", "mockito-core"]

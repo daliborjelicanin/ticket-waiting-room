@@ -19,6 +19,10 @@ project needs to demonstrate; everything else is secondary.
 Check which phase is currently active before assuming a build tool, deployment target,
 or infra format — the same logical architecture is intentionally rebuilt across phases.
 
+**Phase 1 is active.** The step-by-step development + infrastructure plan (low-cost,
+slice-based, teardown-after-every-session) lives in `docs/phase1-plan.md` — consult it
+for what to build next and keep its checkboxes up to date as slices complete.
+
 ## Tech Stack
 
 - Language: Java (JDK 26 / `openjdk-26`)
@@ -132,5 +136,50 @@ Lambda modules, Docker/Jib/`bootBuildImage` config, Terraform, CI workflow files
 - Favor explicit, testable concurrency logic (conditional writes, optimistic locking,
   idempotency keys) over incidental thread-safety — the whole point of this codebase
   is that this logic is visible and correct, not hidden behind a framework default.
+- Use Lombok `@RequiredArgsConstructor` instead of a hand-written constructor
+  whenever the constructor would only assign `final` fields (typical Spring
+  constructor injection). Write an explicit constructor only when it must do
+  more than field assignment. Do not use other Lombok features on records —
+  records already provide accessors/equals/hashCode/toString.
+- Always import classes and use the simple name in code — never inline
+  fully-qualified names (e.g. `ResourceNotFoundException`, not
+  `software.amazon.awssdk.services.dynamodb.model.ResourceNotFoundException`).
+  The only exception is disambiguating two same-named classes used in one file.
+- Record declarations always use the multi-line format: one component per line
+  (indented), closing paren on its own line, and an explicit body even when empty:
+  ```java
+  public record RecordExample(
+          String component1,
+          String component2         
+  ) {
+  }
+  ```
 - No build system exists yet — when adding one, update this file's Tech Stack section
   with real build/test/lint commands rather than leaving them as placeholders.
+
+### Java / Spring Boot Best Practices
+
+Always follow current best practices and idioms for the stack (Java 26,
+Spring Boot 4 / Spring Framework 7) — prefer the modern approach over legacy
+patterns carried forward from older versions. Concretely:
+
+- **Java**: records for DTOs/value objects, sealed interfaces for closed
+  hierarchies, pattern matching (`switch`/`instanceof`) over casts, `Optional`
+  only as a return type, immutability by default (`List.of`, unmodifiable
+  collections), virtual threads for blocking I/O instead of reactive rewrites
+  or custom thread pools.
+- **Spring**: constructor injection only (no field `@Autowired`), configuration
+  via `@ConfigurationProperties` records instead of scattered `@Value`,
+  `RestClient` over `RestTemplate`/`WebClient` for synchronous HTTP, Spring's
+  `ProblemDetail` (RFC 9457) for error responses, explicit transaction
+  boundaries at the service layer, no business logic in controllers.
+- **Testing**: JUnit 5 + AssertJ; Testcontainers for real DynamoDB-local/
+  Redis/Postgres/LocalStack integration tests rather than mocking AWS SDK
+  clients; slice tests (`@WebMvcTest`, `@DataJpaTest`) over full-context
+  `@SpringBootTest` where a slice suffices; concurrency claims must be backed
+  by tests that actually race threads, not single-threaded happy paths.
+- **AWS SDK**: AWS SDK for Java v2 only, with the `DynamoDbEnhancedClient`
+  where it helps, and SDK clients defined as Spring beans so they are
+  injectable and fakeable in tests.
+- When Spring Boot or a library deprecates an API, use the replacement — do
+  not introduce deprecated APIs into new code.
