@@ -1,11 +1,12 @@
 package com.ticketwaitingroom.seatinventory.inventory;
 
+import com.ticketwaitingroom.common.exceptions.HoldNotFoundException;
 import com.ticketwaitingroom.common.exceptions.SeatUnavailableException;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.testcontainers.containers.localstack.LocalStackContainer;
+import org.testcontainers.localstack.LocalStackContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
@@ -31,16 +32,19 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.IntConsumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Proves the project's centerpiece: atomic, race-free seat locking.
  *
  * <p>Runs against a real DynamoDB (LocalStack in Docker) so the concurrency guarantee is
- * exercised end-to-end, not mocked. Many virtual threads race to hold the <em>same</em>
- * AVAILABLE seat; the DynamoDB {@code ConditionExpression} in {@link SeatRepository#holdSeat}
- * must let exactly one win.
+ * exercised end-to-end, not mocked. Many virtual threads race the <em>same</em> seat
+ * through its transitions (hold, confirm, release); the DynamoDB
+ * {@code ConditionExpression}s in {@link SeatRepository} must let exactly one win each
+ * race — a double-sold seat here is the exact bug this project exists to rule out.
  */
 @Testcontainers
 class SeatHoldConcurrencyIT {
@@ -84,34 +88,19 @@ class SeatHoldConcurrencyIT {
     void exactlyOneConcurrentHoldWins() throws InterruptedException {
         int attempts = 100;
         Instant expiresAt = Instant.now().plus(Duration.ofMinutes(5));
-
-        CountDownLatch startGate = new CountDownLatch(1);
-        CountDownLatch done = new CountDownLatch(attempts);
         AtomicInteger successes = new AtomicInteger();
         AtomicInteger failures = new AtomicInteger();
         AtomicReference<String> winningHoldId = new AtomicReference<>();
 
-        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            for (int i = 0; i < attempts; i++) {
-                String holdId = "hold-" + i;
-                executor.submit(() -> {
-                    try {
-                        startGate.await(); // release all threads at once for maximum contention
-                        repository.holdSeat(EVENT_ID, SEAT_ID, holdId, expiresAt);
-                        successes.incrementAndGet();
-                        winningHoldId.set(holdId);
-                    } catch (SeatUnavailableException lost) {
-                        failures.incrementAndGet();
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                    } finally {
-                        done.countDown();
-                    }
-                });
+        race(attempts, i -> {
+            try {
+                repository.holdSeat(EVENT_ID, SEAT_ID, "hold-" + i, expiresAt);
+                successes.incrementAndGet();
+                winningHoldId.set("hold-" + i);
+            } catch (SeatUnavailableException lost) {
+                failures.incrementAndGet();
             }
-            startGate.countDown();
-            assertThat(done.await(30, TimeUnit.SECONDS)).as("all hold attempts finished").isTrue();
-        }
+        });
 
         assertThat(successes).as("exactly one hold succeeds").hasValue(1);
         assertThat(failures).as("every other attempt is rejected").hasValue(attempts - 1);
@@ -120,6 +109,133 @@ class SeatHoldConcurrencyIT {
         assertThat(seat).isNotNull();
         assertThat(seat.status()).isEqualTo(SeatStatus.HELD);
         assertThat(seat.holdId()).isEqualTo(winningHoldId.get());
+    }
+
+    @Test
+    void exactlyOneDuplicateConfirmWins() throws InterruptedException {
+        int attempts = 100;
+        repository.holdSeat(EVENT_ID, SEAT_ID, "hold-1", Instant.now().plus(Duration.ofMinutes(5)));
+        AtomicInteger successes = new AtomicInteger();
+        AtomicInteger failures = new AtomicInteger();
+
+        // duplicate/retried confirm requests for the same hold must sell the seat once
+        race(attempts, i -> {
+            try {
+                repository.confirmPurchase(EVENT_ID, SEAT_ID, "hold-1", Instant.now());
+                successes.incrementAndGet();
+            } catch (HoldNotFoundException lost) {
+                failures.incrementAndGet();
+            }
+        });
+
+        assertThat(successes).as("exactly one confirm succeeds").hasValue(1);
+        assertThat(failures).hasValue(attempts - 1);
+
+        Seat seat = repository.getSeat(EVENT_ID, SEAT_ID);
+        assertThat(seat).isNotNull();
+        assertThat(seat.status()).isEqualTo(SeatStatus.SOLD);
+        assertThat(seat.holdId()).isEqualTo("hold-1");
+        assertThat(seat.holdExpiresAt()).as("TTL removed so a SOLD seat can never be TTL-deleted").isNull();
+    }
+
+    @Test
+    void releaseAndConfirmCannotBothWin() throws InterruptedException {
+        repository.holdSeat(EVENT_ID, SEAT_ID, "hold-1", Instant.now().plus(Duration.ofMinutes(5)));
+        AtomicInteger releases = new AtomicInteger();
+        AtomicInteger confirms = new AtomicInteger();
+
+        race(100, i -> {
+            try {
+                if (i % 2 == 0) {
+                    repository.releaseHold(EVENT_ID, SEAT_ID, "hold-1");
+                    releases.incrementAndGet();
+                } else {
+                    repository.confirmPurchase(EVENT_ID, SEAT_ID, "hold-1", Instant.now());
+                    confirms.incrementAndGet();
+                }
+            } catch (HoldNotFoundException lost) {
+                // expected for every attempt after the first winner
+            }
+        });
+
+        assertThat(releases.get() + confirms.get())
+                .as("the hold is consumed exactly once, by either a release or a confirm")
+                .isEqualTo(1);
+
+        Seat seat = repository.getSeat(EVENT_ID, SEAT_ID);
+        assertThat(seat).isNotNull();
+        if (releases.get() == 1) {
+            assertThat(seat.status()).isEqualTo(SeatStatus.AVAILABLE);
+            assertThat(seat.holdId()).isNull();
+        } else {
+            assertThat(seat.status()).isEqualTo(SeatStatus.SOLD);
+        }
+    }
+
+    @Test
+    void expiredHoldCannotBeConfirmed() {
+        repository.holdSeat(EVENT_ID, SEAT_ID, "hold-1", Instant.now().minus(Duration.ofSeconds(30)));
+
+        assertThatThrownBy(() -> repository.confirmPurchase(EVENT_ID, SEAT_ID, "hold-1", Instant.now()))
+                .isInstanceOf(HoldNotFoundException.class);
+
+        Seat seat = repository.getSeat(EVENT_ID, SEAT_ID);
+        assertThat(seat).isNotNull();
+        assertThat(seat.status()).as("reclaiming the expired hold is the cleanup slice's job").isEqualTo(SeatStatus.HELD);
+    }
+
+    @Test
+    void releaseRequiresTheOwningHoldId() {
+        repository.holdSeat(EVENT_ID, SEAT_ID, "hold-1", Instant.now().plus(Duration.ofMinutes(5)));
+
+        assertThatThrownBy(() -> repository.releaseHold(EVENT_ID, SEAT_ID, "someone-elses-hold"))
+                .isInstanceOf(HoldNotFoundException.class);
+
+        Seat seat = repository.getSeat(EVENT_ID, SEAT_ID);
+        assertThat(seat).isNotNull();
+        assertThat(seat.status()).isEqualTo(SeatStatus.HELD);
+        assertThat(seat.holdId()).isEqualTo("hold-1");
+    }
+
+    @Test
+    void releasedSeatCanBeHeldAgain() {
+        Instant expiresAt = Instant.now().plus(Duration.ofMinutes(5));
+        repository.holdSeat(EVENT_ID, SEAT_ID, "hold-1", expiresAt);
+        repository.releaseHold(EVENT_ID, SEAT_ID, "hold-1");
+
+        repository.holdSeat(EVENT_ID, SEAT_ID, "hold-2", expiresAt);
+
+        Seat seat = repository.getSeat(EVENT_ID, SEAT_ID);
+        assertThat(seat).isNotNull();
+        assertThat(seat.status()).isEqualTo(SeatStatus.HELD);
+        assertThat(seat.holdId()).isEqualTo("hold-2");
+    }
+
+    /**
+     * Runs {@code attempts} virtual threads through {@code attempt}, released by a start
+     * gate at once for maximum contention on the seat item.
+     */
+    private void race(int attempts, IntConsumer attempt) throws InterruptedException {
+        CountDownLatch startGate = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(attempts);
+
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            for (int i = 0; i < attempts; i++) {
+                int index = i;
+                executor.submit(() -> {
+                    try {
+                        startGate.await();
+                        attempt.accept(index);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        done.countDown();
+                    }
+                });
+            }
+            startGate.countDown();
+            assertThat(done.await(30, TimeUnit.SECONDS)).as("all attempts finished").isTrue();
+        }
     }
 
     private void recreateTable() {

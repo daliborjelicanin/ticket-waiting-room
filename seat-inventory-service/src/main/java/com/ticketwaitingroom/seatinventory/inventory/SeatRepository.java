@@ -1,5 +1,6 @@
 package com.ticketwaitingroom.seatinventory.inventory;
 
+import com.ticketwaitingroom.common.exceptions.HoldNotFoundException;
 import com.ticketwaitingroom.common.exceptions.SeatUnavailableException;
 import lombok.RequiredArgsConstructor;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
@@ -15,19 +16,22 @@ import java.util.Map;
 /**
  * Single-table DynamoDB access for seat inventory.
  *
- * <p>The whole point of this class is {@link #holdSeat}: acquiring a hold is an atomic,
- * race-free operation performed by a single {@code UpdateItem} guarded by a
- * {@code ConditionExpression}. DynamoDB serializes conditional writes per item, so
- * exactly one of many concurrent hold attempts for the same seat can win — with no
- * application-level lock and no read-modify-write window.
+ * <p>The whole point of this class is that every state transition ({@link #holdSeat},
+ * {@link #releaseHold}, {@link #confirmPurchase}) is an atomic, race-free operation
+ * performed by a single {@code UpdateItem} guarded by a {@code ConditionExpression}.
+ * DynamoDB serializes conditional writes per item, so exactly one of many concurrent
+ * attempts for the same seat can win — with no application-level lock and no
+ * read-modify-write window.
  *
  * <p>Item shape (single-table design, room to grow for holds/orders later):
  * <pre>
  *   PK  = EVENT#&lt;eventId&gt;
  *   SK  = SEAT#&lt;seatId&gt;
  *   status        = AVAILABLE | HELD | SOLD
- *   holdId        = current hold id      (absent when AVAILABLE)
- *   holdExpiresAt = epoch-seconds TTL    (absent when AVAILABLE)
+ *   holdId        = current hold id      (absent when AVAILABLE; kept on SOLD as the
+ *                                         audit trail of the winning hold)
+ *   holdExpiresAt = epoch-seconds TTL    (present only while HELD — removed on confirm
+ *                                         so TTL can never delete a SOLD seat)
  * </pre>
  */
 @RequiredArgsConstructor
@@ -45,20 +49,29 @@ public class SeatRepository {
     private final String tableName;
 
     /**
-     * Seed a seat in the {@link SeatStatus#AVAILABLE} state. Fails if the seat already
-     * exists, so seeding can never silently clobber a held/sold seat.
+     * Seed a seat in the {@link SeatStatus#AVAILABLE} state. The conditional put refuses
+     * to overwrite an existing item, so seeding can never silently clobber a held/sold
+     * seat — an already-existing seat is reported as {@code false}, not an error, which
+     * makes seeding safely re-runnable.
+     *
+     * @return {@code true} if the seat was created, {@code false} if it already existed
      */
-    public void createAvailableSeat(String eventId, String seatId) {
-        dynamo.putItem(PutItemRequest.builder()
-                .tableName(tableName)
-                .item(Map.of(
-                        ATTR_PK, s(pk(eventId)),
-                        ATTR_SK, s(sk(seatId)),
-                        ATTR_EVENT_ID, s(eventId),
-                        ATTR_SEAT_ID, s(seatId),
-                        ATTR_STATUS, s(SeatStatus.AVAILABLE.name())))
-                .conditionExpression("attribute_not_exists(" + ATTR_PK + ")")
-                .build());
+    public boolean createAvailableSeat(String eventId, String seatId) {
+        try {
+            dynamo.putItem(PutItemRequest.builder()
+                    .tableName(tableName)
+                    .item(Map.of(
+                            ATTR_PK, s(pk(eventId)),
+                            ATTR_SK, s(sk(seatId)),
+                            ATTR_EVENT_ID, s(eventId),
+                            ATTR_SEAT_ID, s(seatId),
+                            ATTR_STATUS, s(SeatStatus.AVAILABLE.name())))
+                    .conditionExpression("attribute_not_exists(" + ATTR_PK + ")")
+                    .build());
+            return true;
+        } catch (ConditionalCheckFailedException e) {
+            return false;
+        }
     }
 
     /**
@@ -92,6 +105,77 @@ public class SeatRepository {
         } catch (ConditionalCheckFailedException e) {
             throw new SeatUnavailableException(
                     "Seat " + seatId + " of event " + eventId + " is not available to hold");
+        }
+    }
+
+    /**
+     * Atomically release a hold, transitioning the seat from {@link SeatStatus#HELD}
+     * back to {@link SeatStatus#AVAILABLE}. Guarded on the {@code holdId} so a stale
+     * caller (whose hold already expired and was re-acquired by someone else) can never
+     * release the current owner's hold. This is also the compensation action the
+     * checkout saga invokes on payment failure.
+     *
+     * @throws HoldNotFoundException if the seat is not HELD under this {@code holdId}
+     */
+    public void releaseHold(String eventId, String seatId, String holdId) {
+        try {
+            dynamo.updateItem(UpdateItemRequest.builder()
+                    .tableName(tableName)
+                    .key(Map.of(
+                            ATTR_PK, s(pk(eventId)),
+                            ATTR_SK, s(sk(seatId))))
+                    .updateExpression("SET #status = :available REMOVE #holdId, #ttl")
+                    .conditionExpression("#status = :held AND #holdId = :holdId")
+                    .expressionAttributeNames(Map.of(
+                            "#status", ATTR_STATUS,
+                            "#holdId", ATTR_HOLD_ID,
+                            "#ttl", ATTR_HOLD_EXPIRES_AT))
+                    .expressionAttributeValues(Map.of(
+                            ":available", s(SeatStatus.AVAILABLE.name()),
+                            ":held", s(SeatStatus.HELD.name()),
+                            ":holdId", s(holdId)))
+                    .build());
+        } catch (ConditionalCheckFailedException e) {
+            throw new HoldNotFoundException(
+                    "No active hold " + holdId + " on seat " + seatId + " of event " + eventId);
+        }
+    }
+
+    /**
+     * Atomically transition a seat from {@link SeatStatus#HELD} to {@link SeatStatus#SOLD}.
+     * The condition checks all three of: currently HELD, held under this {@code holdId},
+     * and the hold not yet expired ({@code holdExpiresAt > now}). The expiry check must
+     * live here in the write itself: DynamoDB TTL deletes lazily (possibly much later),
+     * so without it an expired-but-not-yet-deleted hold could still be confirmed.
+     *
+     * <p>Removes {@code holdExpiresAt} so the TTL can never delete a SOLD seat;
+     * {@code holdId} is kept as the audit trail of the winning hold.
+     *
+     * @throws HoldNotFoundException if the seat is not HELD under this {@code holdId},
+     *                               or the hold has expired
+     */
+    public void confirmPurchase(String eventId, String seatId, String holdId, Instant now) {
+        try {
+            dynamo.updateItem(UpdateItemRequest.builder()
+                    .tableName(tableName)
+                    .key(Map.of(
+                            ATTR_PK, s(pk(eventId)),
+                            ATTR_SK, s(sk(seatId))))
+                    .updateExpression("SET #status = :sold REMOVE #ttl")
+                    .conditionExpression("#status = :held AND #holdId = :holdId AND #ttl > :now")
+                    .expressionAttributeNames(Map.of(
+                            "#status", ATTR_STATUS,
+                            "#holdId", ATTR_HOLD_ID,
+                            "#ttl", ATTR_HOLD_EXPIRES_AT))
+                    .expressionAttributeValues(Map.of(
+                            ":sold", s(SeatStatus.SOLD.name()),
+                            ":held", s(SeatStatus.HELD.name()),
+                            ":holdId", s(holdId),
+                            ":now", n(now.getEpochSecond())))
+                    .build());
+        } catch (ConditionalCheckFailedException e) {
+            throw new HoldNotFoundException(
+                    "No active hold " + holdId + " on seat " + seatId + " of event " + eventId);
         }
     }
 

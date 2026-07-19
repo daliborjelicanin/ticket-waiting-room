@@ -39,7 +39,7 @@ console/CLI steps → (e) tear down**. Code keeps advancing between AWS sessions
 - **Learn:** account hygiene, IAM basics
 
 ### 1. Seat Inventory on real AWS — the centerpiece — ~$0.01/hr while up
-- [ ] Code: release-hold + confirm-purchase endpoints, seed endpoint/script
+- [x] Code: release-hold + confirm-purchase endpoints, seed endpoint/script
 - [ ] DynamoDB table (on-demand) + TTL on `holdExpiresAt`
 - [ ] ECR repo, build & push image (first Docker packaging of a service)
 - [ ] ECS cluster + task definition + Fargate service (public subnet, public IP,

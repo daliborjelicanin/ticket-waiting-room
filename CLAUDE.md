@@ -145,15 +145,26 @@ Lambda modules, Docker/Jib/`bootBuildImage` config, Terraform, CI workflow files
   fully-qualified names (e.g. `ResourceNotFoundException`, not
   `software.amazon.awssdk.services.dynamodb.model.ResourceNotFoundException`).
   The only exception is disambiguating two same-named classes used in one file.
-- Record declarations always use the multi-line format: one component per line
-  (indented), closing paren on its own line, and an explicit body even when empty:
-  ```java
-  public record RecordExample(
-          String component1,
-          String component2         
-  ) {
-  }
-  ```
+- Record declaration format depends on where the record lives:
+  - **Top-level records** (own file) use the multi-line format: one component per
+    line (indented), closing paren on its own line, and an explicit body even when
+    empty:
+    ```java
+    public record RecordExample(
+            String component1,
+            String component2
+    ) {
+    }
+    ```
+  - **Nested records** (declared inside another class — request/response DTOs in a
+    controller, result types on a service) are written as a single line, with the empty body as `{ }`:
+    ```java
+    public record RecordExample(String component1, String component2, String component3) { }
+    ```
+    Nested records are usually small, and one line each keeps the enclosing class's
+    real logic readable instead of pushing it apart with boilerplate. A nested record
+    that needs a real body (compact constructor, extra methods) uses the multi-line
+    form instead.
 - No build system exists yet — when adding one, update this file's Tech Stack section
   with real build/test/lint commands rather than leaving them as placeholders.
 

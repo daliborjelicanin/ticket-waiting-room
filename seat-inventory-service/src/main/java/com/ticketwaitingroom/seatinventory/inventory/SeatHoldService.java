@@ -1,5 +1,6 @@
 package com.ticketwaitingroom.seatinventory.inventory;
 
+import com.ticketwaitingroom.common.exceptions.HoldNotFoundException;
 import com.ticketwaitingroom.common.exceptions.SeatUnavailableException;
 import com.ticketwaitingroom.seatinventory.config.SeatInventoryProperties;
 import lombok.RequiredArgsConstructor;
@@ -10,10 +11,10 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * Application service for holding seats. Generates the hold identity and expiry, then
- * delegates the atomic acquisition to {@link SeatRepository#holdSeat}. The concurrency
- * guarantee lives entirely in the repository's conditional write — this layer adds no
- * locking of its own.
+ * Application service for the seat-hold lifecycle: acquire, release, confirm. Generates
+ * hold identity/expiry and supplies the current time; every atomic transition is
+ * delegated to the {@link SeatRepository} conditional writes. The concurrency guarantee
+ * lives entirely there — this layer adds no locking of its own.
  */
 @Service
 @RequiredArgsConstructor
@@ -34,5 +35,24 @@ public class SeatHoldService {
         Instant expiresAt = clock.instant().plus(properties.holdDuration());
         seatRepository.holdSeat(eventId, seatId, holdId, expiresAt);
         return new SeatHold(eventId, seatId, holdId, expiresAt);
+    }
+
+    /**
+     * Release a hold, making the seat available again.
+     *
+     * @throws HoldNotFoundException if the seat is not currently held under this holdId
+     */
+    public void releaseHold(String eventId, String seatId, String holdId) {
+        seatRepository.releaseHold(eventId, seatId, holdId);
+    }
+
+    /**
+     * Confirm the purchase of a held seat, marking it sold.
+     *
+     * @throws HoldNotFoundException if the seat is not currently held under this holdId,
+     *                               or the hold has expired
+     */
+    public void confirmPurchase(String eventId, String seatId, String holdId) {
+        seatRepository.confirmPurchase(eventId, seatId, holdId, clock.instant());
     }
 }
